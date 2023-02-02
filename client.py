@@ -97,7 +97,7 @@ class DeviceDataLoader():
         """Number of batches"""
         return len(self.dl)
 
-def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2):
+def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2, server):
     running_loss = 0.
     last_loss = 0.
 
@@ -105,19 +105,27 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
     # iter(training_loader) so that we can track the batch
     # index and do some intra-epoch reporting
     for i, data in enumerate(training_loader):
+        # 15000 fores ginete auto to loop per epoch
         # Every data instance is an input + label pair
         inputs, labels = data
-
         # Zero your gradients for every batch!
         optimizer.zero_grad()
 
         # Make predictions for this batch
         outputs1 = model1(inputs)
+        #print(outputs1.shape)
+        
+        
         outputs2 = model2(outputs1)
 
         # Compute the loss and its gradients
         loss = loss_fn(outputs2, labels)
-        loss.backward()
+        pickle.dump([outputs1, labels, loss], open('epoch_data.pkl', 'wb'))
+        send_tensor('epoch_data.pkl', server)
+        receive_tensor('global_loss_recvd.pkl', server)
+        global_loss = pickle.load(open('global_loss_recvd.pkl', 'rb'))
+        # recv tensor compute new loss backprop
+        global_loss.backward()
 
         # Adjust learning weights
         optimizer.step()
@@ -126,12 +134,12 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000 # loss per batch
-            #print('  batch {} loss: {}'.format(i + 1, last_loss))
+            print('  batch {} loss: {}'.format(i + 1, last_loss))
             running_loss = 0.
         
     return last_loss
 
-def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn):
+def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, server):
 
     best_vloss = 1_000_000.
 
@@ -141,7 +149,7 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         # Make sure gradient tracking is on, and do a pass over the data
         model1.train()
         model2.train()
-        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2)
+        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
 
         # We don't need gradients on to do reporting
         model1.eval()
@@ -166,11 +174,12 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
             #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
             #torch.save(model.state_dict(), model_path)
 
-def send_tensor(file, socket):
+def send_tensor(filename, socket):
     buffer = 4096
-    for buffer in file:
-        socket.send(buffer)
-    file.close()
+    with open(filename, 'rb') as file:
+        for buffer in file:
+        #print(buffer)
+            socket.send(buffer)
     socket.send(b"Done")
     return
 
@@ -234,7 +243,7 @@ def main():
 
     EPOCHS = 5
 
-    train(EPOCHS, client_model, client_classifier, train_dl, valid_dl, optimizer, loss_fn)
+    train(EPOCHS, client_model, client_classifier, train_dl, valid_dl, optimizer, loss_fn, server)
 
 
 if __name__ == '__main__':

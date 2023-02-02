@@ -93,6 +93,15 @@ def send_tensor(filename, socket):
     socket.send(b"Done")
     return
 
+def receive_tensor(filename, socket):
+    recvd = socket.recv(buffer_size)
+    with open(filename, 'wb') as file:
+        while (not(str(recvd).__contains__('Done'))):
+            file.write(recvd)
+            recvd = socket.recv(buffer_size)
+        file.write(recvd)
+    return
+
 class ClientModel(nn.Module):
     def __init__(self):
         super(ClientModel, self).__init__()
@@ -131,7 +140,7 @@ class ClientClassifier(nn.Module):
         return x
     
 
-def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2):
+def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2, clientsocket):
     running_loss = 0.
     last_loss = 0.
 
@@ -146,12 +155,17 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         optimizer.zero_grad()
 
         # Make predictions for this batch
-        outputs1 = model1(inputs)
-        outputs2 = model2(outputs1)
-
-        # Compute the loss and its gradients
-        loss = loss_fn(outputs2, labels)
-        loss.backward()
+        #outputs1 = model1(inputs)
+        receive_tensor('client_outputs.pkl', clientsocket)
+        #print('Weights Recieved')
+        client_sent = pickle.load(open('client_outputs.pkl', 'rb'))
+        outputs2 = model2(client_sent[0])
+        # Compute the loss and its gradients send client backprop
+        loss = loss_fn(outputs2, client_sent[1])
+        global_loss = (0.5 * client_sent[2]) + (0.5 * loss)
+        pickle.dump(global_loss, open('global_loss_sent.pkl', 'wb'))
+        send_tensor('global_loss_sent.pkl', clientsocket)
+        global_loss.backward()
 
         # Adjust learning weights
         optimizer.step()
@@ -160,12 +174,12 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000 # loss per batch
-            #print('  batch {} loss: {}'.format(i + 1, last_loss))
+            print('  batch {} loss: {}'.format(i + 1, last_loss))
             running_loss = 0.
         
     return last_loss
 
-def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn):
+def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, clientsocket):
 
     best_vloss = 1_000_000.
 
@@ -175,7 +189,7 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         # Make sure gradient tracking is on, and do a pass over the data
         model1.train()
         model2.train()
-        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2)
+        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, clientsocket)
 
         # We don't need gradients on to do reporting
         model1.eval()
@@ -237,7 +251,7 @@ def main():
     optimizer = torch.optim.SGD(server_model.parameters(), lr=0.001, momentum=0.9)
 
     EPOCHS = 5
-    train(EPOCHS, client_model, server_model, train_dl, valid_dl, optimizer, loss_fn)
+    train(EPOCHS, client_model, server_model, train_dl, valid_dl, optimizer, loss_fn, clientsocket)
 
     
 if __name__ == '__main__':
