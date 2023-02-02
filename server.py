@@ -155,15 +155,51 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
 
         # Adjust learning weights
         optimizer.step()
-
+        
         # Gather data and report
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000 # loss per batch
-            print('  batch {} loss: {}'.format(i + 1, last_loss))
+            #print('  batch {} loss: {}'.format(i + 1, last_loss))
             running_loss = 0.
-
+        
     return last_loss
+
+def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn):
+
+    best_vloss = 1_000_000.
+
+    for epoch in range(epochs):
+        print(f'Epoch {epoch + 1} :')
+
+        # Make sure gradient tracking is on, and do a pass over the data
+        model1.train()
+        model2.train()
+        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2)
+
+        # We don't need gradients on to do reporting
+        model1.eval()
+        model2.eval()
+        
+        running_vloss = 0.0
+        for i, vdata in enumerate(valid_dataloader):
+            vinputs, vlabels = vdata
+            voutputs1 = model1(vinputs)
+            voutputs2 = model2(voutputs1)
+            vloss = loss_fn(voutputs2, vlabels)
+            running_vloss += vloss
+
+        avg_vloss = running_vloss / (i + 1)
+        print(f'Average Training Loss: {avg_loss: .3f}')
+        print(f'Average Validation Loss: {avg_vloss: .3f}')
+
+
+        # Track best performance, and save the model's state
+        if avg_vloss < best_vloss:
+            best_vloss = avg_vloss
+            #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
+            #torch.save(model.state_dict(), model_path)
+
 """
 # Socket Creation and Connection
 server = create_socket_and_listen(serverip, serverport)
@@ -191,46 +227,11 @@ def main():
     train_dl, valid_dl, test_dl = create_dataloader(dataset, test_dataset)
 
     loss_fn = torch.nn.CrossEntropyLoss()
-# Optimizers specified in the torch.optim package
+    # Optimizers specified in the torch.optim package
     optimizer = torch.optim.SGD(model2.parameters(), lr=0.001, momentum=0.9)
 
-    epoch_number = 0
-
     EPOCHS = 5
-
-    best_vloss = 1_000_000.
-
-    for epoch in range(EPOCHS):
-        print('EPOCH {}:'.format(epoch_number + 1))
-
-        # Make sure gradient tracking is on, and do a pass over the data
-        model1.train(True)
-        model2.train(True)
-        avg_loss = train_one_epoch(epoch_number, train_dl   , optimizer, loss_fn, model1, model2)
-
-        # We don't need gradients on to do reporting
-        model1.train(False)
-        model2.train(False)
-        
-        running_vloss = 0.0
-        for i, vdata in enumerate(valid_dl):
-            vinputs, vlabels = vdata
-            voutputs1 = model1(vinputs)
-            voutputs2 = model2(voutputs1)
-            vloss = loss_fn(voutputs2, vlabels)
-            running_vloss += vloss
-
-        avg_vloss = running_vloss / (i + 1)
-        print('LOSS train {} valid {}'.format(avg_loss, avg_vloss))
-
-
-        # Track best performance, and save the model's state
-        if avg_vloss < best_vloss:
-            best_vloss = avg_vloss
-            #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
-            #torch.save(model.state_dict(), model_path)
-
-        epoch_number += 1
+    train(EPOCHS, model1, model2, train_dl, valid_dl, optimizer, loss_fn)
 
     
 if __name__ == '__main__':
