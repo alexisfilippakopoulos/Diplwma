@@ -207,17 +207,23 @@ clientsocket, clientaddress = server.accept()
 print(f'Connection with {clientaddress} established successfully')
 """
 def main():
+
+    # Socket Creation and Connection
+    server = create_socket_and_listen(serverip, serverport)
+    clientsocket, clientaddress = server.accept()
+    print(f'Connection with {clientaddress} established successfully')
+    
     # Model Initialization
-    #clientmodel = ClientModel()
-    #servermodel = ServerModel()
-    #print('Weights: ', clientmodel.state_dict())
-    model1 = ClientModel()
-    model2 = ServerModel()
+    client_model = ClientModel()
+    server_model = ServerModel()
+
+    print('Weights: ', client_model.state_dict())
 
     # Sending the initial weights to the client
-    #pickle.dump(clientmodel.state_dict(), open('server_weights.pkl', 'wb'))
-    #send_tensor('server_weights.pkl', clientsocket)
-    #print('Weights sent')
+    pickle.dump(client_model.state_dict(), open('server_weights.pkl', 'wb'))
+    send_tensor('server_weights.pkl', clientsocket)
+    print('Weights sent')
+
 
     # Device agnostic code
     device = get_default_device()
@@ -228,10 +234,10 @@ def main():
 
     loss_fn = torch.nn.CrossEntropyLoss()
     # Optimizers specified in the torch.optim package
-    optimizer = torch.optim.SGD(model2.parameters(), lr=0.001, momentum=0.9)
+    optimizer = torch.optim.SGD(server_model.parameters(), lr=0.001, momentum=0.9)
 
     EPOCHS = 5
-    train(EPOCHS, model1, model2, train_dl, valid_dl, optimizer, loss_fn)
+    train(EPOCHS, client_model, server_model, train_dl, valid_dl, optimizer, loss_fn)
 
     
 if __name__ == '__main__':

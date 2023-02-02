@@ -71,6 +71,32 @@ def create_dataloader(training_set, test_set):
                         pin_memory=3)
     return train_dl, valid_dl, test_dl
 
+def get_default_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    else:
+        return torch.device('cpu')
+
+def to_device(data, device):
+    if isinstance(data, (list, tuple)):
+        return [to_device(x, device) for x in data]
+    return data.to(device, non_blocking=True)
+
+class DeviceDataLoader():
+    """Wrap a dataloader to move data to a device"""
+    def __init__(self, dl, device):
+        self.dl = dl
+        self.device = device
+        
+    def __iter__(self):
+        """Yield a batch of data after moving it to device"""
+        for b in self.dl: 
+            yield to_device(b, self.device)
+
+    def __len__(self):
+        """Number of batches"""
+        return len(self.dl)
+
 def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2):
     running_loss = 0.
     last_loss = 0.
@@ -182,8 +208,21 @@ print(client_model.state_dict())
 
 
 def main():
+
     client_model = ClientModel()
     client_classifier = ClientClassifier()
+
+    server = create_socket_and_connect(host, port)
+    receive_tensor('starting_weights.pkl', server)
+    #print('Recieved Weights')
+    server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
+    #print(f'Server Weights: {server_weights}')
+    client_model.load_state_dict(server_weights)
+    print(client_model.state_dict())
+
+    # Device agnostic code
+    device = get_default_device()
+    device
 
     dataset, test_dataset = get_dataset()
     train_dl, valid_dl, test_dl = create_dataloader(dataset, test_dataset)
