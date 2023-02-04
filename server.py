@@ -11,7 +11,10 @@ import threading
 import queue
 
 event = threading.Event()
+training_event = threading.Event()
+training_event.set()
 file_lock = threading.Lock()
+training_lock = threading.Lock()
 file_condition = threading.Condition()
 serverip = 'localhost'
 serverport = 9999
@@ -198,7 +201,9 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, servermode
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000 # loss per batch
-            print('  batch {} loss: {}'.format(i + 1, last_loss))
+            print(f'Batch: {i + 1} ')
+            print(f'    Training Loss: {last_loss}')
+            print(f'    Global Loss: {global_loss}')
             running_loss = 0.
         
     return last_loss
@@ -206,7 +211,10 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, servermode
 def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, loss_fn, clientsocket, client_address):
 
     best_vloss = 1_000_000.
-
+    training_event.wait()
+    clientsocket.send(b'train')
+    print(f'Training with {client_address} intiated')
+    training_event.clear()
     for epoch in range(epochs):
         print(f'Epoch {epoch + 1} :')
         event.wait()
@@ -241,7 +249,7 @@ def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, l
             with file_lock:
                 client_sent = unpickle_data(f'{client_address}')
             event.clear()
-            print(len(client_sent))
+            #print(len(client_sent))
             voutputs1 = server_model(client_sent[0])
             vloss = loss_fn(voutputs1, client_sent[1])
             running_vloss += vloss
@@ -256,7 +264,7 @@ def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, l
             best_vloss = avg_vloss
             #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
             #torch.save(model.state_dict(), model_path)
-
+    training_event.set()
 def receive_data1(data, client_address):
     with open(f'{client_address}_data.pkl', 'wb') as file:
         file.write(data)
@@ -315,8 +323,7 @@ def client_handler(client_socket, client_address):
     loss_fn = torch.nn.CrossEntropyLoss()
     # Optimizers specified in the torch.optim package
     optimizer = torch.optim.SGD(server_model.parameters(), lr=0.001, momentum=0.9)
-    EPOCHS = 2
-    
+    EPOCHS = 1
     train(EPOCHS, server_model, train_dl, valid_dl, optimizer, loss_fn, client_socket, client_address)
 #training klp edw
 

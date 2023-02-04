@@ -49,7 +49,7 @@ def get_dataset():
 
 # Creating dataloaders
 def create_dataloader(training_set, test_set):
-    batch_size = 4
+    batch_size = 32
     val_ratio = 0.2
     train_dataset, val_dataset = random_split(training_set, 
                                             [int((1 - val_ratio) * len(training_set)), 
@@ -138,50 +138,53 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000 # loss per batch
-            print('  batch {} loss: {}'.format(i + 1, last_loss))
+            print(f'Batch: {i + 1} ')
+            print(f'    Training Loss: {last_loss}')
             running_loss = 0.
         
     return last_loss
 
 def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, server):
 
-    best_vloss = 1_000_000.
-    for epoch in range(epochs):
-        print(f'Epoch {epoch + 1} :')
-        #print(len(train_dataloader))
-        #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
-        send_data('batches_num.pkl', server, len(train_dataloader))
-        # Make sure gradient tracking is on, and do a pass over the data
-        model1.train()
-        model2.train()
-        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
+    msg = server.recv(1024)
+    if str(msg).__contains__('train'):
+        best_vloss = 1_000_000.
+        for epoch in range(epochs):
+            print(f'Epoch {epoch + 1} :')
+            #print(len(train_dataloader))
+            #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
+            send_data('batches_num.pkl', server, len(train_dataloader))
+            # Make sure gradient tracking is on, and do a pass over the data
+            model1.train()
+            model2.train()
+            avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
 
-        # We don't need gradients on to do reporting
-        model1.eval()
-        model2.eval()
-        running_vloss = 0.0
-        send_data('batches_num.pkl', server, len(valid_dataloader))
-        for i, vdata in enumerate(valid_dataloader):
-            #print('mpika')
-            vinputs, vlabels = vdata
-            voutputs1 = model1(vinputs)
-            voutputs2 = model2(voutputs1)
-            send_data('val_data.pkl', server, [voutputs1, vlabels])
-            #print('val data sent')
-            print(i)
-            vloss = loss_fn(voutputs2, vlabels)
-            running_vloss += vloss
+            # We don't need gradients on to do reporting
+            model1.eval()
+            model2.eval()
+            running_vloss = 0.0
+            send_data('batches_num.pkl', server, len(valid_dataloader))
+            for i, vdata in enumerate(valid_dataloader):
+                #print('mpika')
+                vinputs, vlabels = vdata
+                voutputs1 = model1(vinputs)
+                voutputs2 = model2(voutputs1)
+                send_data('val_data.pkl', server, [voutputs1, vlabels])
+                #print('val data sent')
+                #print(i)
+                vloss = loss_fn(voutputs2, vlabels)
+                running_vloss += vloss
 
-        avg_vloss = running_vloss / (i + 1)
-        print(f'Average Training Loss: {avg_loss: .3f}')
-        print(f'Average Validation Loss: {avg_vloss: .3f}')
+            avg_vloss = running_vloss / (i + 1)
+            print(f'Average Training Loss: {avg_loss: .3f}')
+            print(f'Average Validation Loss: {avg_vloss: .3f}')
 
 
-        # Track best performance, and save the model's state
-        if avg_vloss < best_vloss:
-            best_vloss = avg_vloss
-            #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
-            #torch.save(model.state_dict(), model_path)
+            # Track best performance, and save the model's state
+            if avg_vloss < best_vloss:
+                best_vloss = avg_vloss
+                #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
+                #torch.save(model.state_dict(), model_path)
 
 def send_data(filename, socket, data):
     pickle.dump(data, open(filename, 'wb'))
@@ -242,7 +245,7 @@ def main():
     optimizer = torch.optim.SGD(client_model.parameters(), lr=0.001, momentum=0.9)
 
 
-    EPOCHS = 2
+    EPOCHS = 1
 
     train(EPOCHS, client_model, client_classifier, train_dl, valid_dl, optimizer, loss_fn, server)
 
