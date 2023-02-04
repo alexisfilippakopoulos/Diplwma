@@ -100,13 +100,17 @@ class DeviceDataLoader():
 def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, model2, server):
     running_loss = 0.
     last_loss = 0.
-
+    #print('one epoch mpika')
+    print(len(training_loader))
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
     # index and do some intra-epoch reporting
     for i, data in enumerate(training_loader):
         # 15000 fores ginete auto to loop per epoch
         # Every data instance is an input + label pair
+        #if i ==2:
+            #print('End of training')
+            #break
         inputs, labels = data
         # Zero your gradients for every batch!
         optimizer.zero_grad()
@@ -115,15 +119,15 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         outputs1 = model1(inputs)
         #print(outputs1.shape)
         
-        
         outputs2 = model2(outputs1)
 
         # Compute the loss and its gradients
         loss = loss_fn(outputs2, labels)
-        pickle.dump([outputs1, labels, loss], open('epoch_data.pkl', 'wb'))
-        send_tensor('epoch_data.pkl', server)
-        receive_tensor('global_loss_recvd.pkl', server)
-        global_loss = pickle.load(open('global_loss_recvd.pkl', 'rb'))
+        #pickle.dump([outputs1, labels, loss], open('epoch_data.pkl', 'wb'))
+        send_data('epoch_data.pkl', server, [outputs1, labels, loss])
+        global_loss = receive_data('global_loss_recvd.pkl', server)
+        #print('Global_loss', global_loss)
+        #global_loss = pickle.load(open('global_loss_recvd.pkl', 'rb'))
         # recv tensor compute new loss backprop
         global_loss.backward()
 
@@ -142,10 +146,11 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
 def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, server):
 
     best_vloss = 1_000_000.
-
     for epoch in range(epochs):
         print(f'Epoch {epoch + 1} :')
-
+        #print(len(train_dataloader))
+        #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
+        send_data('batches_num.pkl', server, len(train_dataloader))
         # Make sure gradient tracking is on, and do a pass over the data
         model1.train()
         model2.train()
@@ -154,12 +159,16 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         # We don't need gradients on to do reporting
         model1.eval()
         model2.eval()
-        
         running_vloss = 0.0
+        send_data('batches_num.pkl', server, len(valid_dataloader))
         for i, vdata in enumerate(valid_dataloader):
+            #print('mpika')
             vinputs, vlabels = vdata
             voutputs1 = model1(vinputs)
             voutputs2 = model2(voutputs1)
+            send_data('val_data.pkl', server, [voutputs1, vlabels])
+            #print('val data sent')
+            print(i)
             vloss = loss_fn(voutputs2, vlabels)
             running_vloss += vloss
 
@@ -174,24 +183,29 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
             #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
             #torch.save(model.state_dict(), model_path)
 
-def send_tensor(filename, socket):
+def send_data(filename, socket, data):
+    pickle.dump(data, open(filename, 'wb'))
     buffer = 4096
     with open(filename, 'rb') as file:
         for buffer in file:
         #print(buffer)
             socket.send(buffer)
     socket.send(b"Done")
-    return
+    data = socket.recv(1024)
+    if str(data).__contains__('Done'):
+        return
+    else:
+        print('ZAAAAMN')
 
-
-def receive_tensor(filename, socket):
+def receive_data(filename, socket):
     recvd = socket.recv(buffer_size)
     with open(filename, 'wb') as file:
         while (not(str(recvd).__contains__('Done'))):
             file.write(recvd)
             recvd = socket.recv(buffer_size)
         file.write(recvd)
-    return
+    data = pickle.load(open(filename, 'rb'))
+    return data
 
 def create_socket_and_connect(host, port):
     try:
@@ -203,28 +217,15 @@ def create_socket_and_connect(host, port):
     except socket.error as err:
         print(f"Socket creation failed with error {err}")
 
-"""
-server = create_socket_and_connect(host, port)
-receive_tensor('starting_weights.pkl', server)
-#print('Recieved Weights')
-server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
-#print(f'Server Weights: {server_weights}')
-client_model = ClientModel()
-client_classifier = ClientClassifier()
-client_model.load_state_dict(server_weights)
-print(client_model.state_dict())
-"""
-
-
 def main():
 
     client_model = ClientModel()
     client_classifier = ClientClassifier()
 
     server = create_socket_and_connect(host, port)
-    receive_tensor('starting_weights.pkl', server)
-    #print('Recieved Weights')
-    server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
+    server_weights = receive_data('starting_weights.pkl', server)
+    print('Recieved Weights')
+    #server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
     #print(f'Server Weights: {server_weights}')
     client_model.load_state_dict(server_weights)
     print(client_model.state_dict())
@@ -241,7 +242,7 @@ def main():
     optimizer = torch.optim.SGD(client_model.parameters(), lr=0.001, momentum=0.9)
 
 
-    EPOCHS = 5
+    EPOCHS = 2
 
     train(EPOCHS, client_model, client_classifier, train_dl, valid_dl, optimizer, loss_fn, server)
 
