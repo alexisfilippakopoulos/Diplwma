@@ -8,20 +8,44 @@ import torchvision
 import torchvision.transforms as transforms
 import pickle
 import threading
-import queue
+import struct
+import pyodbc
+import numpy as np
+import time
+
+training_batches_event = threading.Event()
+training_outputs_event = threading.Event()
+training_labels_event = threading.Event()
+training_loss_event = threading.Event()
+validation_batches_event = threading.Event()
+validation_outputs_event = threading.Event()
+validation_labels_event = threading.Event()
 
 event = threading.Event()
 training_event = threading.Event()
 training_event.set()
 file_lock = threading.Lock()
 training_lock = threading.Lock()
+cursor_lock = threading.Lock()
+select_event = threading.Event()
 file_condition = threading.Condition()
 serverip = 'localhost'
 serverport = 9999
 buffer_size = 4096
-global client_socket
+connection = pyodbc.connect(
+    'Driver={ODBC Driver 17 for SQL Server};'
+    'Server=LAPTOP-LGNU4S88;'
+    'Database=SplitGP;'
+    'Trusted_Connection=yes;'
 
+)
+storing_connection = pyodbc.connect(
+    'Driver={ODBC Driver 17 for SQL Server};'
+    'Server=LAPTOP-LGNU4S88;'
+    'Database=SplitGP;'
+    'Trusted_Connection=yes;'
 
+)
 
 # Downloading Dataset
 def get_dataset():
@@ -91,21 +115,29 @@ def create_socket_and_listen(serverIp, serverPort):
         print("Socket successfully created")
         server.bind((serverIp, serverPort))
         server.listen(5)
-        listen_thread = threading.Thread(target=listen_for_connections, args=(server,))
+        storing_cursor = storing_connection.cursor()
+        fetching_cursor = connection.cursor()
+        listen_thread = threading.Thread(target=listen_for_connections, args=(server, storing_cursor, fetching_cursor))
         listen_thread.start()
         return server
     except socket.error as err:
         print(f"Socket creation failed with error {err}")
 
-def send_data(filename, socket, data):
+def send_data(socket, data):
+    serialized_tensor = pickle.dumps(data)
+    #print(len(serialized_tensor))
+    socket.sendall(serialized_tensor)
+    socket.sendall(b'Done')
+    return
+    """
     pickle.dump(data, open(filename, 'wb'))
     buffer = 4096
     with open(filename, 'rb') as file:
         for buffer in file:
-        #print(buffer)
             socket.send(buffer)
     socket.send(b"Done")
     return
+    """
 
 def receive_data(filename, socket):
     recvd = socket.recv(buffer_size)
@@ -131,7 +163,6 @@ class ClientModel(nn.Module):
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
-        #x = x.view(-1, 16 * 4 * 4)
         return x
     
 class ServerModel(nn.Module):
@@ -159,39 +190,63 @@ class ClientClassifier(nn.Module):
         return x
     
 
-def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, servermodel, clientsocket, client_batches, client_address):
+def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, servermodel, clientsocket, client_batches, client_address, fetching_cursor):
     running_loss = 0.
     last_loss = 0.
-    print('one epoch mpika')
-    print('Client batches: ', client_batches)
+    #print('Client training batches: ', client_batches)
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
     # index and do some intra-epoch reporting
     for i in range(client_batches):
-        # Every data instance is an input + label pair
-        #inputs, labels = data
-
+        #print('Mpika sto per epoch')
         # Zero your gradients for every batch!
         optimizer.zero_grad()
         #if i == 2:
             #print('End of training')
             #break
         # Make predictions for this batch
-        #outputs1 = model1(inputs)
-        event.wait()
-        #with file_condition:
-        #file_condition.wait()
-        with file_lock:
-            client_sent = unpickle_data(f'{client_address}')
-        event.clear()
-        #print('Weights Recieved')
-        #client_sent = pickle.load(open('client_outputs.pkl', 'rb'))
-        outputs2 = servermodel(client_sent[0])
+        training_outputs_event.wait()
+        with cursor_lock:
+            fetching_cursor.execute('SELECT training_outputs FROM clients WHERE socket = ?', (client_address[1],))
+            select_event.set()
+            select_event.wait()
+            select_event.clear()
+            client_outputs = pickle.loads(fetching_cursor.fetchone()[0])
+            connection.commit()
+            fetching_cursor.close()
+            fetching_cursor = connection.cursor()
+        training_outputs_event.clear()
+        #print('Elava client outputs')
+        outputs2 = servermodel(client_outputs)
+        #print('Ypologisa ta dika mou outputs')
         # Compute the loss and its gradients send client backprop
-        loss = loss_fn(outputs2, client_sent[1])
-        global_loss = (0.5 * client_sent[2]) + (0.5 * loss)
-        #pickle.dump(global_loss, open('global_loss_sent.pkl', 'wb'))
-        send_data('global_loss_sent.pkl', clientsocket, global_loss)
+        training_labels_event.wait()
+        with cursor_lock:
+            fetching_cursor.execute('SELECT training_labels FROM clients WHERE socket = ?', (client_address[1],))
+            select_event.set()
+            select_event.wait()
+            select_event.clear()
+            client_labels = pickle.loads(fetching_cursor.fetchone()[0])
+            connection.commit()
+            fetching_cursor.close()
+            fetching_cursor = connection.cursor()
+        training_labels_event.clear()
+        loss = loss_fn(outputs2, client_labels)
+        training_loss_event.wait()
+        #print('Ypologisa loss mou')
+        with cursor_lock:
+            fetching_cursor.execute('SELECT training_loss FROM clients WHERE socket = ?', (client_address[1],))
+            select_event.set()
+            select_event.wait()
+            select_event.clear()
+            client_loss = pickle.loads(fetching_cursor.fetchone()[0])
+            connection.commit()
+            fetching_cursor.close()
+            fetching_cursor = connection.cursor()
+        training_loss_event.clear()
+        global_loss = (0.5 * client_loss) + (0.5 * loss)
+        send_data(clientsocket, global_loss)
+        #print('global loss: ', global_loss)
         global_loss.backward()
 
         # Adjust learning weights
@@ -205,10 +260,10 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, servermode
             print(f'    Training Loss: {last_loss}')
             print(f'    Global Loss: {global_loss}')
             running_loss = 0.
-        
-    return last_loss
+    print('eftasa sto na fyge apo per epoch')
+    return last_loss, fetching_cursor
 
-def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, loss_fn, clientsocket, client_address):
+def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, loss_fn, clientsocket, client_address, fetching_cursor):
 
     best_vloss = 1_000_000.
     training_event.wait()
@@ -217,51 +272,57 @@ def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, l
     training_event.clear()
     for epoch in range(epochs):
         print(f'Epoch {epoch + 1} :')
-        event.wait()
-        #with file_condition:
-        #file_condition.wait()
-        with file_lock:
-            client_batches = unpickle_data(f'{client_address}')
-        event.clear()
-        #client_batches = pickle.load(open('client_batches.pkl', 'rb'))
-        print('Client_batches :', client_batches)
-        # Make sure gradient tracking is on, and do a pass over the data
+        training_batches_event.wait()
+        #with file_lock:
+            #client_batches = unpickle_data(f'{client_address}')
+        with cursor_lock:
+            fetching_cursor.execute(f'SELECT training_batches FROM clients WHERE socket = {client_address[1]}')
+            select_event.set()
+            select_event.wait()
+            select_event.clear()
+            client_batches = fetching_cursor.fetchone()[0]
+            connection.commit()
+            fetching_cursor.close()
+            fetching_cursor = connection.cursor()
+        training_batches_event.clear()
+        print('Client batches :', client_batches)
         server_model.train()
-        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, server_model, clientsocket, client_batches, client_address)
-
+        avg_loss, fetching_cursor = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, server_model, clientsocket, client_batches, client_address, fetching_cursor)
+        """
         # We don't need gradients on to do reporting
         server_model.eval()
-        #client_batches = receive_data('client_batches.pkl', clientsocket)
-        event.wait()
-        #with file_condition:
-            #file_condition.wait()
-        with file_lock:
-            client_batches = unpickle_data(f'{client_address}')
-        event.clear()
-        #print('Val Batches: ', client_batches)
+        validation_batches_event.wait()
+        validation_batches_event.clear()
+        with cursor_lock:
+            fetching_cursor.execute(f'SELECT validation_batches FROM clients WHERE socket = {client_address[1]}')
+            client_batches = fetching_cursor.fetchone()[0]
         running_vloss = 0.0
-        for batch in range(client_batches):
-            #print('mpika')
-            #client_sent = receive_data('client_valid_recvd.pkl', clientsocket)
-            event.wait()
-            #with file_condition:
-                #file_condition.wait()
-            with file_lock:
-                client_sent = unpickle_data(f'{client_address}')
-            event.clear()
-            #print(len(client_sent))
-            voutputs1 = server_model(client_sent[0])
-            vloss = loss_fn(voutputs1, client_sent[1])
-            running_vloss += vloss
 
-        avg_vloss = running_vloss / (batch + 1)
+        for batch in range(client_batches):
+            validation_outputs_event.wait()
+            validation_outputs_event.clear()
+            with cursor_lock:
+                fetching_cursor.execute(f'SELECT validation_outputs FROM clients WHERE socket = {client_address[1]}')
+                client_outputs = fetching_cursor.fetchone()[0]
+            #print(client_outputs.shape)
+            voutputs1 = server_model(client_outputs)
+            print('LEGOOOOO')
+            validation_labels_event.wait()
+            validation_labels_event.clear()
+            with cursor_lock:
+                fetching_cursor.execute(f'SELECT validation_labels FROM clients WHERE socket = {client_address[1]}')
+                validation_labels = fetching_cursor.fetchone()[0]
+            vloss = loss_fn(voutputs1, validation_labels)
+            running_vloss += vloss
+        """
+        #avg_vloss = running_vloss / (batch + 1)
         print(f'Average Training Loss: {avg_loss: .3f}')
-        print(f'Average Validation Loss: {avg_vloss: .3f}')
+        #print(f'Average Validation Loss: {avg_vloss: .3f}')
 
 
         # Track best performance, and save the model's state
-        if avg_vloss < best_vloss:
-            best_vloss = avg_vloss
+        #if avg_vloss < best_vloss:
+            #best_vloss = avg_vloss
             #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
             #torch.save(model.state_dict(), model_path)
     training_event.set()
@@ -271,61 +332,130 @@ def receive_data1(data, client_address):
     return
 
 
-def listen_for_data(client_socket, client_address):
+def listen_for_data(client_socket, client_address, storing_cursor):
     print(f'[+] Communication thread for {client_address} created.')
-    data_queue = queue.Queue()
+    data = b''
     while True:
-        data = client_socket.recv(4096)
-        data_queue.put(data)
-        #receive_data1(data, client_address)
-        #print(data)
-        if str(data).__contains__('Done'):
-            data_queue.put('SEPERATOR')
-            storing_thread = threading.Thread(target=store_data, args=(client_address, data_queue, client_socket))
-            storing_thread.start()
-        if not data:
+        data_chunk = client_socket.recv(4096)
+        #print('Arxiko chunk: ', data_chunk)
+        if str(data_chunk).__contains__('<SEPERATOR>') and str(data_chunk).__contains__('Done'):
+            #print('Mpika stin kaki')
+            payload = data_chunk.split(b'<SEPERATOR>')[1].split(b'Done')[0]
+            payload = bytes(payload)
+            data += payload
+            if header.__contains__('batch'):
+                #print('stlenw thread gia int')
+                storing_thread = threading.Thread(target=store_data, args=(client_address, data, header, storing_cursor, True))
+                storing_thread.start()
+            else:
+                storing_thread = threading.Thread(target=store_data, args=(client_address, data, header, storing_cursor, False))
+                storing_thread.start()
+            
+            print(f'Dexthika {header}')
+            client_socket.send(bytes('Recvd', 'utf-8'))
+            data = b''
+        elif str(data_chunk).__contains__('<SEPERATOR>'):
+            #print('Chunk sto sep: ', data_chunk)
+            header, payload = data_chunk.split(b'<SEPERATOR>', 1)
+            header = header.decode()
+            #print('Header sto sep: ', header)
+            #print('Payload sto sep: ', payload)
+            if payload != b'':
+                #print('mpika')
+                payload = bytes(payload)
+                data += payload
+            #pass
+            #print('Data sto sep: ', data)
+        elif str(data_chunk).__contains__('Done'):
+            payload, _ = data_chunk.split(b'Done', 1)
+            #print('Payload sto done: ', payload)
+            payload = bytes(payload)
+            #print('Payload sto done: ', payload)
+            data += payload
+            #print('Data to send to storage: ', len(data))
+            if header.__contains__('batch'):
+                #print('stlenw thread gia int')
+                storing_thread = threading.Thread(target=store_data, args=(client_address, data, header, storing_cursor, True))
+                storing_thread.start()
+            else:
+                storing_thread = threading.Thread(target=store_data, args=(client_address, data, header, storing_cursor, False))
+                storing_thread.start()
+            client_socket.send(bytes('Recvd', 'utf-8'))
+            data = b''
+        else:
+            #print('Bainw akyra')
+            data += data_chunk
+
+        if not data_chunk:
             break
 
-def store_data(client_address, data_queue, client_socket):
-    #with file_condition:
-    with file_lock:
-        with open(f'{client_address}.pkl', 'wb') as file:
-            data = data_queue.get()
-            while data != 'SEPERATOR':
-                file.write(data)
-                data = data_queue.get()
-    client_socket.send(b'Done')
-    event.set()
-        #file_condition.notify_all()
+
+def store_data(client_address, data, header, storing_cursor, int_flag):
+    if int_flag:
+        with cursor_lock:
+            storing_cursor.execute(f"UPDATE clients SET {header} = ? WHERE socket = ?", (struct.unpack('!i', data)[0], int(client_address[1])))
+    else:
+        with cursor_lock:
+            storing_cursor.execute(f"UPDATE clients SET {header} = ? WHERE socket = ?", (data, int(client_address[1])))
+    
+    storing_connection.commit()
+    if header == 'training_batches': 
+        print('AYOOOOOOOOOOOOOOOOOOOOO')
+        training_batches_event.set()
+    if header == 'training_outputs': 
+        training_outputs_event.set()
+    if header == 'training_labels': 
+        training_labels_event.set()
+    if header == 'training_loss': 
+        training_loss_event.set()
+    if header == 'validation_batches': 
+        validation_batches_event.set()
+    if header == 'validation_outputs': 
+        validation_outputs_event.set()
+    if header == 'validation_labels': 
+        validation_labels_event.set()
+    
+    
+    #event.set()
     return
 
 
-def listen_for_connections(socket):
+def listen_for_connections(socket, storing_cursor, fetching_cursor):
     while True:
         client_socket, client_address = socket.accept()
         print(f'[+] Connection with {client_address} established.')
-        communication_thread = threading.Thread(target=listen_for_data, args=(client_socket, client_address))
+        with cursor_lock:
+            storing_cursor.execute('INSERT INTO clients(socket) VALUES (?)', (client_address[1],))
+        connection.commit()
+        #print('Added to table')
+        communication_thread = threading.Thread(target=listen_for_data, args=(client_socket, client_address, storing_cursor))
         communication_thread.start()
-        client_thread = threading.Thread(target=client_handler, args=(client_socket, client_address))
+        client_thread = threading.Thread(target=client_handler, args=(client_socket, client_address, fetching_cursor))
         client_thread.start()
 
-def client_handler(client_socket, client_address):
+def client_handler(client_socket, client_address, fetching_cursor):
+    # Model Initialization
     client_model = ClientModel()
     server_model = ServerModel()
-    send_data(f'{client_address}_data.pkl', client_socket, client_model.state_dict())
+    send_data(client_socket, client_model.state_dict())
+    #state_dict_bytes = pickle.dumps(client_model.state_dict())
+    #print(len(state_dict_bytes))
+    #client_socket.sendall(state_dict_bytes)
+    #client_socket.send(b'Done')
     print('Weights sent')
+    # Device agnostic code
     device = get_default_device()
     device
-
+    # Get dataset and dataloaders
     dataset, test_dataset = get_dataset()
     train_dl, valid_dl, test_dl = create_dataloader(dataset, test_dataset)
-
+    # Define loss function and optimizer
     loss_fn = torch.nn.CrossEntropyLoss()
-    # Optimizers specified in the torch.optim package
     optimizer = torch.optim.SGD(server_model.parameters(), lr=0.001, momentum=0.9)
-    EPOCHS = 1
-    train(EPOCHS, server_model, train_dl, valid_dl, optimizer, loss_fn, client_socket, client_address)
-#training klp edw
+    # Start Training
+    EPOCHS = 20
+    train(EPOCHS, server_model, train_dl, valid_dl, optimizer, loss_fn, client_socket, client_address, fetching_cursor)
+
 
 
 def main():

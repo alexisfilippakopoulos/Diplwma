@@ -7,10 +7,15 @@ import torchvision.transforms as transforms
 import torchvision
 from torch.utils.data import DataLoader, random_split
 import pickle
+import struct
+import threading
 
 host = '127.0.0.1'
 port = 9999
 buffer_size = 4096
+recvd_event = threading.Event()
+train_event = threading.Event()
+received_event = threading.Event()
 
 class ClientModel(nn.Module):
     def __init__(self):
@@ -124,8 +129,19 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         # Compute the loss and its gradients
         loss = loss_fn(outputs2, labels)
         #pickle.dump([outputs1, labels, loss], open('epoch_data.pkl', 'wb'))
-        send_data('epoch_data.pkl', server, [outputs1, labels, loss])
-        global_loss = receive_data('global_loss_recvd.pkl', server)
+        #send_data('epoch_data', server, [outputs1, labels, loss])
+        send_data('training_outputs', server, outputs1)
+        received_event.wait()
+        received_event.clear()
+        send_data('training_labels', server, labels)
+        received_event.wait()
+        received_event.clear()
+        send_data('training_loss', server, loss)
+        received_event.wait()
+        received_event.clear()
+        recvd_event.wait()
+        global_loss = pickle.load(open('server_sent.pkl', 'rb'))
+        recvd_event.clear()
         #print('Global_loss', global_loss)
         #global_loss = pickle.load(open('global_loss_recvd.pkl', 'rb'))
         # recv tensor compute new loss backprop
@@ -146,47 +162,74 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
 
 def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, server):
 
-    msg = server.recv(1024)
-    if str(msg).__contains__('train'):
-        best_vloss = 1_000_000.
-        for epoch in range(epochs):
-            print(f'Epoch {epoch + 1} :')
+
+    #train_event.wait()
+    #train_event.clear()
+    best_vloss = 1_000_000.
+    for epoch in range(epochs):
+        print(f'Epoch {epoch + 1} :')
             #print(len(train_dataloader))
             #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
-            send_data('batches_num.pkl', server, len(train_dataloader))
-            # Make sure gradient tracking is on, and do a pass over the data
-            model1.train()
-            model2.train()
-            avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
+        send_data('training_batches', server, len(train_dataloader))
+        received_event.wait()
+        received_event.clear()
+        print('ayo')
+                # Make sure gradient tracking is on, and do a pass over the data
+        model1.train()
+        model2.train()
+        avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
 
-            # We don't need gradients on to do reporting
-            model1.eval()
-            model2.eval()
-            running_vloss = 0.0
-            send_data('batches_num.pkl', server, len(valid_dataloader))
-            for i, vdata in enumerate(valid_dataloader):
-                #print('mpika')
-                vinputs, vlabels = vdata
-                voutputs1 = model1(vinputs)
-                voutputs2 = model2(voutputs1)
-                send_data('val_data.pkl', server, [voutputs1, vlabels])
-                #print('val data sent')
-                #print(i)
-                vloss = loss_fn(voutputs2, vlabels)
-                running_vloss += vloss
+                # We don't need gradients on to do reporting
+        model1.eval()
+        model2.eval()
+        
+        running_vloss = 0.0
+        """
+        send_data('validation_batches', server, len(valid_dataloader))
+        received_event.wait()
+        received_event.clear()
+        for i, vdata in enumerate(valid_dataloader):
+                    #print('mpika')
+            vinputs, vlabels = vdata
+            voutputs1 = model1(vinputs)
+            send_data('validation_outputs', server, voutputs1)
+            #print('val shape', voutputs1.shape)
+            received_event.wait()
+            received_event.clear()
+            send_data('validation_labels', server, vlabels)
+            received_event.wait()
+            received_event.clear()
+            voutputs2 = model2(voutputs1)
+                    #print('val data sent')
+                    #print(i)
+            vloss = loss_fn(voutputs2, vlabels)
+            running_vloss += vloss
+        """
+        #avg_vloss = running_vloss / (i + 1)
+        print(f'Average Training Loss: {avg_loss: .3f}')
+        #print(f'Average Validation Loss: {avg_vloss: .3f}')
 
-            avg_vloss = running_vloss / (i + 1)
-            print(f'Average Training Loss: {avg_loss: .3f}')
-            print(f'Average Validation Loss: {avg_vloss: .3f}')
 
+                # Track best performance, and save the model's state
+        #if avg_vloss < best_vloss:
+            #best_vloss = avg_vloss
+                    #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
+                    #torch.save(model.state_dict(), model_path)
 
-            # Track best performance, and save the model's state
-            if avg_vloss < best_vloss:
-                best_vloss = avg_vloss
-                #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
-                #torch.save(model.state_dict(), model_path)
-
-def send_data(filename, socket, data):
+def send_data(message, socket, data):
+    message += '<SEPERATOR>'
+    #print('Message to send: ', message)
+    socket.send(bytes(message, 'utf-8'))
+    if isinstance(data, int):
+        data = struct.pack('!i', data)
+        socket.send(data)
+        socket.send(b'Done')
+    else:
+        serialized_tensor = pickle.dumps(data)
+        socket.sendall(serialized_tensor)
+        socket.sendall(b'Done')
+    return
+    """
     pickle.dump(data, open(filename, 'wb'))
     buffer = 4096
     with open(filename, 'rb') as file:
@@ -199,16 +242,13 @@ def send_data(filename, socket, data):
         return
     else:
         print('ZAAAAMN')
+    """
 
-def receive_data(filename, socket):
-    recvd = socket.recv(buffer_size)
-    with open(filename, 'wb') as file:
-        while (not(str(recvd).__contains__('Done'))):
-            file.write(recvd)
-            recvd = socket.recv(buffer_size)
-        file.write(recvd)
-    data = pickle.load(open(filename, 'rb'))
-    return data
+def receive_data(data):
+    with open('server_sent.pkl', 'wb') as file:
+        pickle.dump(data, file)
+    recvd_event.set()
+    return
 
 def create_socket_and_connect(host, port):
     try:
@@ -216,9 +256,39 @@ def create_socket_and_connect(host, port):
         print(f"[+] Connecting to {host}:{port}")
         s.connect((host, port))
         print("[+] Connected.")
+        listen_thread = threading.Thread(target=listen_for_data, args=(s, ))
+        listen_thread.start()
         return s
     except socket.error as err:
         print(f"Socket creation failed with error {err}")
+
+def listen_for_data(server):
+    print(f'[+] Communication thread for {server} created.')
+    data = b''
+    while True:
+        data_chunk = server.recv(4096)
+        #print(data_chunk)
+        if str(data_chunk).__contains__('Done'):
+            payload, _ = data_chunk.split(b'Done', 1)
+            payload = bytes(payload)
+            data += payload
+            #print(len(data))
+            #print(str(data).__contains__('Done'))
+            #print(str(data).__contains__('train'))
+            #print(str(data).__contains__('Recvd'))
+            #store_thread = threading.Thread(target=receive_data, args=(data, ))
+            #store_thread.start()
+            with open('server_sent.pkl', 'wb') as file:
+                file.write(data)
+            recvd_event.set()
+            data = b''
+        elif data_chunk == b'train':
+            train_event.set()
+        elif data_chunk == b'Recvd':
+            received_event.set()
+        else:
+            data += data_chunk
+
 
 def main():
 
@@ -226,7 +296,9 @@ def main():
     client_classifier = ClientClassifier()
 
     server = create_socket_and_connect(host, port)
-    server_weights = receive_data('starting_weights.pkl', server)
+    recvd_event.wait()
+    server_weights = pickle.load(open('server_sent.pkl', 'rb'))
+    recvd_event.clear()
     print('Recieved Weights')
     #server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
     #print(f'Server Weights: {server_weights}')
@@ -245,7 +317,7 @@ def main():
     optimizer = torch.optim.SGD(client_model.parameters(), lr=0.001, momentum=0.9)
 
 
-    EPOCHS = 1
+    EPOCHS = 20
 
     train(EPOCHS, client_model, client_classifier, train_dl, valid_dl, optimizer, loss_fn, server)
 
