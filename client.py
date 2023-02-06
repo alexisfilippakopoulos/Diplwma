@@ -15,6 +15,7 @@ port = 9999
 buffer_size = 4096
 recvd_event = threading.Event()
 train_event = threading.Event()
+server_completion = threading.Event()
 received_event = threading.Event()
 
 class ClientModel(nn.Module):
@@ -184,14 +185,17 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         model2.eval()
         
         running_vloss = 0.0
-        """
+
         send_data('validation_batches', server, len(valid_dataloader))
         received_event.wait()
         received_event.clear()
         for i, vdata in enumerate(valid_dataloader):
+            server_completion.set() if i == 0 else None
                     #print('mpika')
             vinputs, vlabels = vdata
             voutputs1 = model1(vinputs)
+            server_completion.wait()
+            server_completion.clear()
             send_data('validation_outputs', server, voutputs1)
             #print('val shape', voutputs1.shape)
             received_event.wait()
@@ -204,15 +208,15 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
                     #print(i)
             vloss = loss_fn(voutputs2, vlabels)
             running_vloss += vloss
-        """
-        #avg_vloss = running_vloss / (i + 1)
+
+        avg_vloss = running_vloss / (i + 1)
         print(f'Average Training Loss: {avg_loss: .3f}')
-        #print(f'Average Validation Loss: {avg_vloss: .3f}')
+        print(f'Average Validation Loss: {avg_vloss: .3f}')
 
 
                 # Track best performance, and save the model's state
-        #if avg_vloss < best_vloss:
-            #best_vloss = avg_vloss
+        if avg_vloss < best_vloss:
+            best_vloss = avg_vloss
                     #model_path = 'model_{}_{}'.format(timestamp, epoch_number)
                     #torch.save(model.state_dict(), model_path)
 
@@ -286,6 +290,8 @@ def listen_for_data(server):
             train_event.set()
         elif data_chunk == b'Recvd':
             received_event.set()
+        elif data_chunk == b'OK':
+            server_completion.set()
         else:
             data += data_chunk
 
