@@ -11,7 +11,8 @@ import threading
 import struct
 import pyodbc
 import numpy as np
-import time
+from tqdm.auto import tqdm
+
 
 training_batches_event = threading.Event()
 training_outputs_event = threading.Event()
@@ -127,7 +128,7 @@ def send_data(socket, data):
     serialized_tensor = pickle.dumps(data)
     #print(len(serialized_tensor))
     socket.sendall(serialized_tensor)
-    socket.sendall(b'Done')
+    socket.sendall(b'<Done>')
     return
     """
     pickle.dump(data, open(filename, 'wb'))
@@ -269,11 +270,11 @@ def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, l
 
     best_vloss = 1_000_000.
     training_event.wait()
-    clientsocket.send(b'train')
+    clientsocket.send(b'<train>')
     print(f'Training with {client_address} intiated')
     training_event.clear()
-    for epoch in range(epochs):
-        print(f'Epoch {epoch + 1} :')
+    for epoch in tqdm(range(epochs), desc="Epoch"):
+        #print(f'Epoch {epoch + 1} :')
         training_batches_event.wait()
         #with file_lock:
             #client_batches = unpickle_data(f'{client_address}')
@@ -332,10 +333,10 @@ def train(epochs, server_model, train_dataloader, valid_dataloader, optimizer, l
                 fetching_cursor = connection.cursor()
             voutputs1 = server_model(client_outputs)
             vloss = loss_fn(voutputs1, validation_labels)
-            clientsocket.send(b'OK')
-            print('Esteiila OK')
+            clientsocket.send(b'<OK>')
+            #print('Esteiila OK')
             running_vloss += vloss
-            #print(batch)
+            #eaprint(batch)
 
         
         avg_vloss = running_vloss / (batch + 1)
@@ -375,7 +376,7 @@ def listen_for_data(client_socket, client_address, storing_cursor):
                 storing_thread.start()
             
             #print(f'Dexthika {header}')
-            client_socket.send(bytes('Recvd', 'utf-8'))
+            client_socket.send(bytes('<Recvd>', 'utf-8'))
             data = b''
         elif str(data_chunk).__contains__('<SEPERATOR>'):
             #print('Chunk sto sep: ', data_chunk)
@@ -389,8 +390,8 @@ def listen_for_data(client_socket, client_address, storing_cursor):
                 data += payload
             #pass
             #print('Data sto sep: ', data)
-        elif str(data_chunk).__contains__('Done'):
-            payload, _ = data_chunk.split(b'Done', 1)
+        elif str(data_chunk).__contains__('<Done>'):
+            payload, _ = data_chunk.split(b'<Done>', 1)
             #print('Payload sto done: ', payload)
             payload = bytes(payload)
             #print('Payload sto done: ', payload)
@@ -403,7 +404,7 @@ def listen_for_data(client_socket, client_address, storing_cursor):
             else:
                 storing_thread = threading.Thread(target=store_data, args=(client_address, data, header, storing_cursor, False))
                 storing_thread.start()
-            client_socket.send(bytes('Recvd', 'utf-8'))
+            client_socket.send(bytes('<Recvd>', 'utf-8'))
             data = b''
         else:
             #print('Bainw akyra')

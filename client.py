@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, random_split
 import pickle
 import struct
 import threading
+from tqdm.auto import tqdm
 
 host = '127.0.0.1'
 port = 9999
@@ -167,8 +168,8 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
     #train_event.wait()
     #train_event.clear()
     best_vloss = 1_000_000.
-    for epoch in range(epochs):
-        print(f'Epoch {epoch + 1} :')
+    for epoch in tqdm(range(epochs), desc="Epoch"):
+        #print(f'Epoch {epoch + 1} :')
             #print(len(train_dataloader))
             #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
         send_data('training_batches', server, len(train_dataloader))
@@ -227,11 +228,11 @@ def send_data(message, socket, data):
     if isinstance(data, int):
         data = struct.pack('!i', data)
         socket.send(data)
-        socket.send(b'Done')
+        socket.send(b'<Done>')
     else:
         serialized_tensor = pickle.dumps(data)
         socket.sendall(serialized_tensor)
-        socket.sendall(b'Done')
+        socket.sendall(b'<Done>')
     return
     """
     pickle.dump(data, open(filename, 'wb'))
@@ -272,8 +273,8 @@ def listen_for_data(server):
     while True:
         data_chunk = server.recv(4096)
         #print(data_chunk)
-        if str(data_chunk).__contains__('Done'):
-            payload, _ = data_chunk.split(b'Done', 1)
+        if str(data_chunk).__contains__('<Done>'):
+            payload, _ = data_chunk.split(b'<Done>', 1)
             payload = bytes(payload)
             data += payload
             #print(len(data))
@@ -286,11 +287,11 @@ def listen_for_data(server):
                 file.write(data)
             recvd_event.set()
             data = b''
-        elif data_chunk == b'train':
+        elif data_chunk == b'<train>':
             train_event.set()
-        elif data_chunk == b'Recvd':
+        elif data_chunk == b'<Recvd>':
             received_event.set()
-        elif data_chunk == b'OK':
+        elif data_chunk == b'<OK>':
             server_completion.set()
         else:
             data += data_chunk
