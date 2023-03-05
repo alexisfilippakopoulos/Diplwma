@@ -172,6 +172,7 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         #print(f'Epoch {epoch + 1} :')
             #print(len(train_dataloader))
             #pickle.dump(len(train_dataloader), open('batches_num.pkl', 'wb'))
+        
         send_data('training_batches', server, len(train_dataloader))
         received_event.wait()
         received_event.clear()
@@ -310,7 +311,7 @@ def main():
     #server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
     #print(f'Server Weights: {server_weights}')
     client_model.load_state_dict(server_weights)
-    print(client_model.state_dict())
+    #print(client_model.state_dict())
 
     # Device agnostic code
     device = get_default_device()

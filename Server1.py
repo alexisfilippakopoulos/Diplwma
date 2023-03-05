@@ -33,17 +33,18 @@ class Server:
         self.fetching_connection = pyodbc.connect(
             'Driver={ODBC Driver 17 for SQL Server};'
             'Server=LAPTOP-LGNU4S88;'
-            'Database=SplitGP;'
+            'Database=Thesis;'
             'Trusted_Connection=yes;'
         )
         self.storing_connection = pyodbc.connect(
             'Driver={ODBC Driver 17 for SQL Server};'
             'Server=LAPTOP-LGNU4S88;'
-            'Database=SplitGP;'
+            'Database=Thesis;'
             'Trusted_Connection=yes;'
         )
         self.storing_cursor = self.storing_connection.cursor()
         self.fetching_cursor = self.fetching_connection.cursor()
+        self.client_counter = 0
         threading.Thread(target=self.create_socket, args=(())).start()
 
     def create_socket(self):
@@ -70,15 +71,18 @@ class Server:
             client_socket, client_address = server.accept()
             print(f'[+] Connection with {client_address} established.')
             with cursor_lock:
-                self.storing_cursor.execute('INSERT INTO clients(socket) VALUES (?)', (client_address[1],))
-            self.storing_connection.commit()
+                self.storing_cursor.execute('INSERT INTO clients(address, port) VALUES (?, ?)', (client_address[0], client_address[1]))
+                self.storing_connection.commit()
+                self.storing_cursor.execute('SELECT id FROM clients WHERE address = ? AND port = ?', client_address[0], client_address[1])
+                client_id = self.storing_cursor.fetchone()[0]
+            self.client_counter += 1
             #print('Added to table')
-            communication_thread = threading.Thread(target=self.listen_for_data, args=(client_socket, client_address))
+            communication_thread = threading.Thread(target=self.listen_for_data, args=(client_socket, client_address, client_id))
             communication_thread.start()
-            client_thread = threading.Thread(target=self.client_handler, args=(client_socket, client_address))
+            client_thread = threading.Thread(target=self.client_handler, args=(client_socket, client_address, client_id))
             client_thread.start()
         
-    def listen_for_data(self, client_socket, client_address):
+    def listen_for_data(self, client_socket, client_address, client_id):
         print(f'[+] Communication thread for {client_address} created.')
         data = b''
         while True:
@@ -91,10 +95,11 @@ class Server:
                 data += payload
                 if header.__contains__('batch'):
                     #print('stlenw thread gia int')
-                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, True))
+                    set = 'training' if header.__contains___('train') else 'validation'
+                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, True, set, client_id))
                     storing_thread.start()
                 else:
-                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, False))
+                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, False, set, client_id))
                     storing_thread.start()
                 
                 #print(f'Dexthika {header}')
@@ -121,10 +126,11 @@ class Server:
                 #print('Data to send to storage: ', len(data))
                 if header.__contains__('batch'):
                     #print('stlenw thread gia int')
-                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, True))
+                    set = 'training' if header.__contains__('train') else 'validation'
+                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, True, set, client_id))
                     storing_thread.start()
                 else:
-                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, False))
+                    storing_thread = threading.Thread(target=self.store_data, args=(client_address, data, header, False, set, client_id))
                     storing_thread.start()
                 client_socket.send(bytes('<Recvd>', 'utf-8'))
                 data = b''
@@ -135,15 +141,25 @@ class Server:
             if not data_chunk:
                 break
 
-    def store_data(self, client_address, data, header, int_flag):
+    def store_data(self, client_address, data, header, int_flag, set, client_id):
+        query = f"""
+                IF EXISTS (SELECT * FROM {set} WHERE client_id = ?)
+                BEGIN
+                    UPDATE {set} SET {header} = ? WHERE client_id = ?
+                END
+                ELSE
+                BEGIN
+                    INSERT INTO {set} (client_id, {header}) VALUES (?, ?)
+                END"""
         if int_flag:
             with cursor_lock:
-                self.storing_cursor.execute(f"UPDATE clients SET {header} = ? WHERE socket = ?", (struct.unpack('!i', data)[0], int(client_address[1])))
+                self.storing_cursor.execute(query, (client_id, int(struct.unpack('!i', data)[0]), client_id, client_id, int(struct.unpack('!i', data)[0])))
         else:
             with cursor_lock:
-                self.storing_cursor.execute(f"UPDATE clients SET {header} = ? WHERE socket = ?", (data, int(client_address[1])))
+                self.storing_cursor.execute(query, (client_id, data, client_id, client_id, data))
         
         self.storing_connection.commit()
+
         if header == 'training_batches': 
             training_batches_event.set()
         if header == 'training_outputs': 
@@ -159,7 +175,7 @@ class Server:
         if header == 'validation_labels': 
             validation_labels_event.set()
 
-    def client_handler(self, client_socket, client_address):
+    def client_handler(self, client_socket, client_address, client_id):
         # Model Initialization
         client_model = ClientModel()
         server_model = ServerModel()
@@ -177,7 +193,7 @@ class Server:
         optimizer = torch.optim.SGD(server_model.parameters(), lr=0.001, momentum=0.9)
         # Start Training
         EPOCHS = 20
-        self.train(EPOCHS, server_model, optimizer, loss_fn, client_socket, client_address)
+        self.train(EPOCHS, server_model, optimizer, loss_fn, client_socket, client_address, client_id)
 
 
     def get_default_device(self, ):
@@ -191,7 +207,7 @@ class Server:
             return [self.to_device(x, device) for x in data]
         return data.to(device, non_blocking=True)
     #train_one_epoch(epoch, optimizer, loss_fn, server_model, clientsocket, client_batches, client_address)
-    def train_one_epoch(self, optimizer, loss_fn, servermodel, clientsocket, client_batches, client_address):
+    def train_one_epoch(self, optimizer, loss_fn, servermodel, clientsocket, client_batches, client_address, client_id):
         running_loss = 0.
         last_loss = 0.
         #print('Client training batches: ', client_batches)
@@ -208,7 +224,7 @@ class Server:
             # Make predictions for this batch
             training_outputs_event.wait()
             with cursor_lock:
-                self.fetching_cursor.execute('SELECT training_outputs FROM clients WHERE socket = ?', (client_address[1],))
+                self.fetching_cursor.execute('SELECT training_outputs FROM training WHERE client_id = ?', client_id)
                 select_event.set()
                 select_event.wait()
                 select_event.clear()
@@ -223,7 +239,7 @@ class Server:
             # Compute the loss and its gradients send client backprop
             training_labels_event.wait()
             with cursor_lock:
-                self.fetching_cursor.execute('SELECT training_labels FROM clients WHERE socket = ?', (client_address[1],))
+                self.fetching_cursor.execute('SELECT training_labels FROM training WHERE client_id = ?', client_id)
                 select_event.set()
                 select_event.wait()
                 select_event.clear()
@@ -236,7 +252,7 @@ class Server:
             training_loss_event.wait()
             #print('Ypologisa loss mou')
             with cursor_lock:
-                self.fetching_cursor.execute('SELECT training_loss FROM clients WHERE socket = ?', (client_address[1],))
+                self.fetching_cursor.execute('SELECT training_loss FROM training WHERE client_id = ?', client_id)
                 select_event.set()
                 select_event.wait()
                 select_event.clear()
@@ -264,7 +280,7 @@ class Server:
         #print('eftasa sto na fyge apo per epoch')
         return last_loss
 
-    def train(self, epochs, server_model, optimizer, loss_fn, clientsocket, client_address):
+    def train(self, epochs, server_model, optimizer, loss_fn, clientsocket, client_address, client_id):
 
         best_vloss = 1_000_000.
         training_event.wait()
@@ -277,7 +293,7 @@ class Server:
             #with file_lock:
                 #client_batches = unpickle_data(f'{client_address}')
             with cursor_lock:
-                self.fetching_cursor.execute(f'SELECT training_batches FROM clients WHERE socket = {client_address[1]}')
+                self.fetching_cursor.execute(f'SELECT training_batches FROM training WHERE client_id = ?', client_id)
                 select_event.set()
                 select_event.wait()
                 select_event.clear()
@@ -288,14 +304,14 @@ class Server:
             training_batches_event.clear()
             print('Client batches :', client_batches)
             server_model.train()
-            avg_loss = self.train_one_epoch(optimizer, loss_fn, server_model, clientsocket, client_batches, client_address)
+            avg_loss = self.train_one_epoch(optimizer, loss_fn, server_model, clientsocket, client_batches, client_address, client_id)
             
             # We don't need gradients on to do reporting
             server_model.eval()
             validation_batches_event.wait()
             validation_batches_event.clear()
             with cursor_lock:
-                self.fetching_cursor.execute(f'SELECT validation_batches FROM clients WHERE socket = {client_address[1]}')
+                self.fetching_cursor.execute(f'SELECT validation_batches FROM validation WHERE client_id = ?', client_id)
                 select_event.set()
                 select_event.wait()
                 select_event.clear()
@@ -309,7 +325,7 @@ class Server:
                 validation_outputs_event.wait()
                 validation_outputs_event.clear()
                 with cursor_lock:
-                    self.fetching_cursor.execute(f'SELECT validation_outputs FROM clients WHERE socket = {client_address[1]}')
+                    self.fetching_cursor.execute(f'SELECT validation_outputs FROM validation WHERE client_id = ?', client_id)
                     select_event.set()
                     select_event.wait()
                     select_event.clear()
@@ -317,11 +333,10 @@ class Server:
                     self.fetching_connection.commit()
                 self.fetching_cursor.close()
                 self.fetching_cursor = self.fetching_connection.cursor()
-                #print(client_outputs.shape)
                 validation_labels_event.wait()
                 validation_labels_event.clear()
                 with cursor_lock:
-                    self.fetching_cursor.execute(f'SELECT validation_labels FROM clients WHERE socket = {client_address[1]}')
+                    self.fetching_cursor.execute(f'SELECT validation_labels FROM validation WHERE client_id = ?', client_id)
                     select_event.set()
                     select_event.wait()
                     select_event.clear()
@@ -332,9 +347,8 @@ class Server:
                 voutputs1 = server_model(client_outputs)
                 vloss = loss_fn(voutputs1, validation_labels)
                 clientsocket.send(b'<OK>')
-                #print('Esteiila OK')
                 running_vloss += vloss
-                #eaprint(batch)
+
 
             
             avg_vloss = running_vloss / (batch + 1)
