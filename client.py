@@ -108,7 +108,7 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
     running_loss = 0.
     last_loss = 0.
     #print('one epoch mpika')
-    print(len(training_loader))
+    #print(len(training_loader))
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
     # index and do some intra-epoch reporting
@@ -148,19 +148,19 @@ def train_one_epoch(epoch_index, training_loader, optimizer, loss_fn, model1, mo
         #global_loss = pickle.load(open('global_loss_recvd.pkl', 'rb'))
         # recv tensor compute new loss backprop
         global_loss.backward()
-
         # Adjust learning weights
         optimizer.step()
         
         # Gather data and report
         running_loss += loss.item()
-        if i % 1000 == 999:
-            last_loss = running_loss / 1000 # loss per batch
-            print(f'Batch: {i + 1} ')
-            print(f'    Training Loss: {last_loss}')
-            running_loss = 0.
         
-    return last_loss
+    send_data('model_updated_weights', server, model1.state_dict())
+    received_event.wait()
+    received_event.clear()
+    send_data('classifier_updated_weights', server, model2.state_dict())
+    received_event.wait()
+    received_event.clear()
+    return running_loss / len(training_loader)
 
 def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer, loss_fn, server):
 
@@ -176,10 +176,14 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
         send_data('training_batches', server, len(train_dataloader))
         received_event.wait()
         received_event.clear()
-        print('ayo')
+        #print('ayo')
                 # Make sure gradient tracking is on, and do a pass over the data
         model1.train()
         model2.train()
+        print('\nWaiting...')
+        train_event.wait()
+        train_event.clear()
+        print('\nTraining...')
         avg_loss = train_one_epoch(epoch, train_dataloader, optimizer, loss_fn, model1, model2, server)
 
                 # We don't need gradients on to do reporting
@@ -212,8 +216,8 @@ def train(epochs, model1, model2, train_dataloader, valid_dataloader, optimizer,
             running_vloss += vloss
 
         avg_vloss = running_vloss / (i + 1)
-        print(f'Average Training Loss: {avg_loss: .3f}')
-        print(f'Average Validation Loss: {avg_vloss: .3f}')
+        print(f'\nAverage Training Loss: {avg_loss: .3f}')
+        print(f'Average Validation Loss: {avg_vloss: .3f}\n')
 
 
                 # Track best performance, and save the model's state
@@ -259,9 +263,9 @@ def receive_data(data):
 def create_socket_and_connect(host, port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"[+] Connecting to {host}:{port}")
+        #print(f"\n[+] Connecting to {host}:{port}")
         s.connect((host, port))
-        print("[+] Connected.")
+        print(f"\n[+] Connected to ('{host}', {port}) successfully.")
         listen_thread = threading.Thread(target=listen_for_data, args=(s, ))
         listen_thread.start()
         return s
@@ -269,7 +273,7 @@ def create_socket_and_connect(host, port):
         print(f"Socket creation failed with error {err}")
 
 def listen_for_data(server):
-    print(f'[+] Communication thread for {server} created.')
+    #print(f'[+] Communication thread for {server} created.')
     data = b''
     while True:
         data_chunk = server.recv(4096)
@@ -288,7 +292,7 @@ def listen_for_data(server):
                 file.write(data)
             recvd_event.set()
             data = b''
-        elif data_chunk == b'<train>':
+        elif data_chunk == b'<Train>':
             train_event.set()
         elif data_chunk == b'<Recvd>':
             received_event.set()
@@ -307,7 +311,7 @@ def main():
     recvd_event.wait()
     server_weights = pickle.load(open('server_sent.pkl', 'rb'))
     recvd_event.clear()
-    print('Recieved Weights')
+    print('\nRecieved Weights')
     #server_weights = pickle.load(open('starting_weights.pkl', 'rb'))
     #print(f'Server Weights: {server_weights}')
     client_model.load_state_dict(server_weights)
